@@ -262,8 +262,9 @@ def main():
         full_df = fetch_data()
         spot_prices = fetch_spot_prices()
         
+    # Force redeploy: Update 2
     if full_df.empty:
-        st.error("Data unavailable (Empty DataFrame returned). This could be due to API limits or empty response."); st.stop()
+        st.error("Data unavailable. This could be due to API limits or empty response. See detailed error above if any."); st.stop()
 
     # 2. Generate Recommendations for ALL assets
     opportunities_df = generate_recommendations(full_df, spot_prices)
