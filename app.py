@@ -28,9 +28,19 @@ def fetch_spot_prices():
 def fetch_data():
     try:
         t_res = requests.get(OPTIONS_TICKER_API_URL, timeout=10)
-        tickers = t_res.json() if t_res.status_code == 200 else []
+        if t_res.status_code != 200:
+            st.error(f"Ticker API Error: {t_res.status_code} - {t_res.text[:200]}")
+            return pd.DataFrame()
+            
+        tickers = t_res.json()
+        
         m_res = requests.get(OPTIONS_MARK_API_URL, timeout=10)
-        marks = m_res.json() if m_res.status_code == 200 else []
+        if m_res.status_code != 200:
+            st.error(f"Mark API Error: {m_res.status_code} - {m_res.text[:200]}")
+            marks = []
+        else:
+            marks = m_res.json()
+            
         mark_map = {m['symbol']: m for m in marks}
         
         data = []
