@@ -263,7 +263,7 @@ def main():
         spot_prices = fetch_spot_prices()
         
     if full_df.empty:
-        st.error("Data unavailable. Check API connection."); st.stop()
+        st.error("Data unavailable (Empty DataFrame returned). This could be due to API limits or empty response."); st.stop()
 
     # 2. Generate Recommendations for ALL assets
     opportunities_df = generate_recommendations(full_df, spot_prices)
