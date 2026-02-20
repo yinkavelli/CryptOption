@@ -134,120 +134,83 @@ def generate_recommendations(df, spot_prices):
         spot_price = spot_prices.get(f"{underlying}USDT", 0)
         if spot_price == 0: continue
 
-        # --- A. BULL PUT SPREAD ---
-        short_put = find_leg(group_df, 'Put', -0.35, -0.20)
-        long_put = find_leg(group_df, 'Put', -0.15, -0.05)
+        # --- A. LONG CALL (Directional Bullish) ---
+        long_call = find_leg(group_df, 'Call', 0.45, 0.65) # ATM/ITM Call
         
-        if short_put is not None and long_put is not None:
-             if short_put['Strike'] > long_put['Strike']:
-                credit = short_put['Bid'] - long_put['Ask']
-                width = short_put['Strike'] - long_put['Strike']
-                max_risk = width - credit
-                
-                if credit > 0 and max_risk > 0:
-                    rr = max_risk / credit
-                    if rr < 6:
-                        recs.append({
-                            "Type": "Bull Put Spread",
-                            "Symbol": f"{underlying} Bull Put {short_put['Strike']}/{long_put['Strike']}",
-                            "Underlying": underlying,
-                            "Expiry": exp,
-                            "DTE": dte,
-                            "Spot": spot_price,
-                            "Legs": [
-                                {"Side": "Sell", "Option": short_put, "Price": short_put['Bid']},
-                                {"Side": "Buy", "Option": long_put, "Price": long_put['Ask']}
-                            ],
-                            "Credit": credit, "MaxRisk": max_risk,
-                            "NetDelta": short_put['Delta'] - long_put['Delta'], 
-                            "NetTheta": short_put['Theta'] - long_put['Theta'],
-                            "BreakEven": short_put['Strike'] - credit,
-                            "ProbProfit": (1 - abs(short_put['Delta'])) * 100 # Approx
-                        })
+        if long_call is not None:
+            premium = long_call['Ask']
+            if premium > 0:
+                recs.append({
+                    "Type": "Long Call",
+                    "Symbol": f"{underlying} Long Call {long_call['Strike']}",
+                    "Underlying": underlying,
+                    "Expiry": exp,
+                    "DTE": dte,
+                    "Spot": spot_price,
+                    "Legs": [
+                        {"Side": "Buy", "Option": long_call, "Price": premium}
+                    ],
+                    "Credit": -premium, # Debit logic handled inverted for display or standardized? Let's use negative credit for debit
+                    "MaxRisk": premium,
+                    "NetDelta": long_call['Delta'], 
+                    "NetTheta": long_call['Theta'],
+                    "BreakEven": long_call['Strike'] + premium,
+                    "ProbProfit": (1 - long_call['Delta']) * 100 # Rough approx
+                })
 
-        # --- B. BEAR CALL SPREAD ---
-        short_call = find_leg(group_df, 'Call', 0.20, 0.35)
-        long_call = find_leg(group_df, 'Call', 0.05, 0.15)
+        # --- B. LONG PUT (Directional Bearish) ---
+        long_put = find_leg(group_df, 'Put', -0.65, -0.45) # ATM/ITM Put
         
-        if short_call is not None and long_call is not None:
-             if short_call['Strike'] < long_call['Strike']:
-                credit = short_call['Bid'] - long_call['Ask']
-                width = long_call['Strike'] - short_call['Strike']
-                max_risk = width - credit
-                
-                if credit > 0 and max_risk > 0 and (max_risk/credit < 6):
-                    recs.append({
-                        "Type": "Bear Call Spread",
-                        "Symbol": f"{underlying} Bear Call {short_call['Strike']}/{long_call['Strike']}",
-                        "Underlying": underlying,
-                        "Expiry": exp,
-                        "DTE": dte,
-                        "Spot": spot_price,
-                        "Legs": [
-                            {"Side": "Sell", "Option": short_call, "Price": short_call['Bid']},
-                            {"Side": "Buy", "Option": long_call, "Price": long_call['Ask']}
-                        ],
-                        "Credit": credit, "MaxRisk": max_risk,
-                        "NetDelta": -short_call['Delta'] + long_call['Delta'],
-                        "NetTheta": -short_call['Theta'] + long_call['Theta'],
-                        "BreakEven": short_call['Strike'] + credit,
-                        "ProbProfit": (1 - short_call['Delta']) * 100 # Approx
-                    })
+        if long_put is not None:
+            premium = long_put['Ask']
+            if premium > 0:
+                recs.append({
+                    "Type": "Long Put",
+                    "Symbol": f"{underlying} Long Put {long_put['Strike']}",
+                    "Underlying": underlying,
+                    "Expiry": exp,
+                    "DTE": dte,
+                    "Spot": spot_price,
+                    "Legs": [
+                        {"Side": "Buy", "Option": long_put, "Price": premium}
+                    ],
+                    "Credit": -premium,
+                    "MaxRisk": premium,
+                    "NetDelta": long_put['Delta'], 
+                    "NetTheta": long_put['Theta'],
+                    "BreakEven": long_put['Strike'] - premium,
+                    "ProbProfit": (1 - abs(long_put['Delta'])) * 100 
+                })
 
-        # --- C. IRON CONDOR (Symmetric wings) ---
-        short_put_candidate = find_leg(group_df, 'Put', -0.25, -0.15)
-        short_call_candidate = find_leg(group_df, 'Call', 0.15, 0.25)
-        
-        if short_put_candidate is not None and short_call_candidate is not None:
-            sp_strike = short_put_candidate['Strike']
-            sc_strike = short_call_candidate['Strike']
-            
-            available_strikes = set(group_df['Strike'])
-            
-            # Find best symmetric width
-            candidates = []
-            # Calculate step size based on underlying price roughly (e.g. BTC 1000, ETH 100)
-            step = 1000 if spot_price > 10000 else 100 if spot_price > 1000 else 10
-            widths = [step*i for i in range(1, 6)] # Check 5 width levels
-            
-            for width in widths:
-                lp_strike = sp_strike - width
-                lc_strike = sc_strike + width
+        # --- C. LONG STRADDLE (Volatility Play) ---
+        # Buy ATM Call + Buy ATM Put
+        atm_call = find_leg(group_df, 'Call', 0.45, 0.55)
+        # Find put with matching strike
+        if atm_call is not None:
+             atm_put = group_df[(group_df['Strike'] == atm_call['Strike']) & (group_df['Type'] == 'Put') & (group_df['Liquid'])]
+             
+             if not atm_put.empty:
+                atm_put = atm_put.iloc[0]
+                cost = atm_call['Ask'] + atm_put['Ask']
                 
-                if lp_strike in available_strikes and lc_strike in available_strikes:
-                    lp = group_df[(group_df['Strike']==lp_strike) & (group_df['Type']=='Put') & (group_df['Liquid'])].head(1)
-                    lc = group_df[(group_df['Strike']==lc_strike) & (group_df['Type']=='Call') & (group_df['Liquid'])].head(1)
-                    
-                    if not lp.empty and not lc.empty:
-                        candidates.append((width, lp.iloc[0], lc.iloc[0]))
-            
-            if candidates:
-                # Pick first valid candidate (smallest width usually safest for defined risk)
-                width, lp, lc = candidates[0]
-                sp, sc = short_put_candidate, short_call_candidate
-                
-                total_credit = (sp['Bid'] - lp['Ask']) + (sc['Bid'] - lc['Ask'])
-                max_risk = width - total_credit
-                
-                if total_credit > 0 and max_risk > 0:
+                if cost > 0:
                      recs.append({
-                        "Type": "Iron Condor",
-                        "Symbol": f"{underlying} Condor {lp['Strike']}/{sp['Strike']} | {sc['Strike']}/{lc['Strike']}",
+                        "Type": "Long Straddle",
+                        "Symbol": f"{underlying} Straddle {atm_call['Strike']}",
                         "Underlying": underlying,
                         "Expiry": exp,
                         "DTE": dte,
                         "Spot": spot_price,
                         "Legs": [
-                            {"Side": "Buy", "Option": lp, "Price": lp['Ask']},
-                            {"Side": "Sell", "Option": sp, "Price": sp['Bid']},
-                            {"Side": "Sell", "Option": sc, "Price": sc['Bid']},
-                            {"Side": "Buy", "Option": lc, "Price": lc['Ask']}
+                            {"Side": "Buy", "Option": atm_call, "Price": atm_call['Ask']},
+                            {"Side": "Buy", "Option": atm_put, "Price": atm_put['Ask']}
                         ],
-                        "Credit": total_credit, "MaxRisk": max_risk,
-                        "NetDelta": (-sp['Delta'] + lp['Delta']) + (-sc['Delta'] + lc['Delta']), # Approx
-                        "NetTheta": (-sp['Theta'] + lp['Theta']) + (-sc['Theta'] + lc['Theta']),
-                        "BreakEven": "Multiple",
-                        "ProbProfit": (1 - (abs(sp['Delta']) + sc['Delta'])) * 100 # Approx probability between short strikes
+                        "Credit": -cost, 
+                        "MaxRisk": cost,
+                        "NetDelta": atm_call['Delta'] + atm_put['Delta'], 
+                        "NetTheta": atm_call['Theta'] + atm_put['Theta'],
+                        "BreakEven": f"{atm_call['Strike'] - cost:.2f} / {atm_call['Strike'] + cost:.2f}",
+                        "ProbProfit": 40 # Varies heavily, hard to calc simply
                     })
 
     return pd.DataFrame(recs)
@@ -320,8 +283,8 @@ def main():
             fig = go.Figure()
             
             # Green/Red Areas
-            fig.add_trace(go.Scatter(
-                x=x_vals, y=y_vals,
+            fig.add_trace(go.Scatter(ost (Debit)", format="$%.2f"),
+        "MaxRisk": st.column_config.NumberColumn("Risk (Premium)
                 fill='tozeroy',
                 mode='lines',
                 line=dict(color='cyan', width=3),
@@ -335,9 +298,9 @@ def main():
             fig.add_vline(x=spot, line_dash="dash", line_color="yellow", annotation_text="Current Price")
             
             # Break Even Marker (Vertical Line)
-            if strategy['BreakEven'] != "Multiple":
+            if isinstance(strategy['BreakEven'], (int, float)):
                  fig.add_vline(x=strategy['BreakEven'], line_dash="dot", line_color="orange", annotation_text="Break Even")
-
+            
             fig.update_layout(
                 title=f"Payoff Diagram ({strategy['Type']})",
                 xaxis_title="Price at Expiry",
@@ -351,14 +314,15 @@ def main():
             st.subheader("Risk Mechanics")
             
             m1, m2 = st.columns(2)
-            m1.metric("Max Profit (Credit)", f"${strategy['Credit']:.2f}", help="Net cash RECEIVED upfront.")
-            m2.metric("Max Loss (Collateral)", f"${strategy['MaxRisk']:.2f}", delta_color="inverse", help="This amount is held as collateral.")
+            m1.metric("Est. Cost (Debit)", f"${-strategy['Credit']:.2f}", help="Cash PAID upfront.")
+            m2.metric("Max Loss", f"${strategy['MaxRisk']:.2f}", delta_color="inverse", help="Total premium paid.")
             
             st.metric("Probability of Profit (Est.)", f"{strategy['ProbProfit']:.1f}%", help="Estimated chance that the price stays in the profit zone.")
-            st.metric("Risk / Reward Ratio", f"1 : {strategy['MaxRisk']/strategy['Credit']:.1f}")
             
-            if strategy['BreakEven'] != "Multiple":
+            if isinstance(strategy['BreakEven'], (int, float)):
                 st.metric("Break Even Price", f"${strategy['BreakEven']:,.2f}")
+            else:
+                 st.metric("Break Even Prices", str(strategy['BreakEven']))
                 
             st.markdown("---")
             g1, g2 = st.columns(2)
