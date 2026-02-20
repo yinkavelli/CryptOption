@@ -283,8 +283,8 @@ def main():
             fig = go.Figure()
             
             # Green/Red Areas
-            fig.add_trace(go.Scatter(ost (Debit)", format="$%.2f"),
-        "MaxRisk": st.column_config.NumberColumn("Risk (Premium)
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=y_vals,
                 fill='tozeroy',
                 mode='lines',
                 line=dict(color='cyan', width=3),
