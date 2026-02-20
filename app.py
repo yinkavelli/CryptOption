@@ -154,6 +154,8 @@ def generate_recommendations(df, spot_prices):
                     "MaxRisk": premium,
                     "NetDelta": long_call['Delta'], 
                     "NetTheta": long_call['Theta'],
+                    "NetGamma": long_call['Gamma'],
+                    "NetVega": long_call['Vega'],
                     "BreakEven": long_call['Strike'] + premium,
                     "ProbProfit": (1 - long_call['Delta']) * 100 # Rough approx
                 })
@@ -176,6 +178,8 @@ def generate_recommendations(df, spot_prices):
                     ],
                     "Credit": -premium,
                     "MaxRisk": premium,
+                    "NetGamma": long_put['Gamma'],
+                    "NetVega": long_put['Vega'],
                     "NetDelta": long_put['Delta'], 
                     "NetTheta": long_put['Theta'],
                     "BreakEven": long_put['Strike'] - premium,
@@ -207,6 +211,8 @@ def generate_recommendations(df, spot_prices):
                         ],
                         "Credit": -cost, 
                         "MaxRisk": cost,
+                        "NetGamma": atm_call['Gamma'] + atm_put['Gamma'],
+                        "NetVega": atm_call['Vega'] + atm_put['Vega'],
                         "NetDelta": atm_call['Delta'] + atm_put['Delta'], 
                         "NetTheta": atm_call['Theta'] + atm_put['Theta'],
                         "BreakEven": f"{atm_call['Strike'] - cost:.2f} / {atm_call['Strike'] + cost:.2f}",
@@ -245,11 +251,15 @@ def main():
         "Type": st.column_config.TextColumn("Type", width="medium"),
         "Underlying": st.column_config.TextColumn("Asset", width="small"),
         "Expiry": st.column_config.TextColumn("Expiry", width="medium"),
-        "DTE": st.column_config.NumberColumn("DTE", format="%d days"),
-        "Credit": st.column_config.NumberColumn("Credit (Profit)", format="$%.2f"),
-        "MaxRisk": st.column_config.NumberColumn("Max Risk", format="$%.2f"),
-        "ProbProfit": st.column_config.ProgressColumn("Prob. Profit", format="%.0f%%", min_value=0, max_value=100),
+        "NetDelta": st.column_config.NumberColumn("Delta", format="%.2f"),
+        "NetGamma": st.column_config.NumberColumn("Gamma", format="%.4f"),
+        "NetTheta": st.column_config.NumberColumn("Theta", format="%.2f"),
+        "NetVega": st.column_config.NumberColumn("Vega", format="%.2f"),
     }
+
+    # Use selection API for the table
+    event = st.dataframe(
+        opportunities_df[['Underlying', 'Type', 'Expiry', 'DTE', 'Symbol', 'Credit', 'MaxRisk', 'ProbProfit', 'NetDelta', 'NetGamma', 'NetTheta', 'NetVega']],
 
     # Use selection API for the table
     event = st.dataframe(
