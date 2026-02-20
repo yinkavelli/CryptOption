@@ -260,10 +260,6 @@ def main():
     # Use selection API for the table
     event = st.dataframe(
         opportunities_df[['Underlying', 'Type', 'Expiry', 'DTE', 'Symbol', 'Credit', 'MaxRisk', 'ProbProfit', 'NetDelta', 'NetGamma', 'NetTheta', 'NetVega']],
-
-    # Use selection API for the table
-    event = st.dataframe(
-        opportunities_df[['Underlying', 'Type', 'Expiry', 'DTE', 'Symbol', 'Credit', 'MaxRisk', 'ProbProfit']],
         column_config=column_config,
         use_container_width=True,
         hide_index=True,
