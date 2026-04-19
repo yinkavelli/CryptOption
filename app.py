@@ -6,354 +6,295 @@ import plotly.graph_objects as go
 from datetime import datetime
 import numpy as np
 
-# --- 1. CONFIG & API ENDPOINTS ---
+# --- CONFIG ---
 OPTIONS_TICKER_API_URL = "https://eapi.binance.com/eapi/v1/ticker"
 OPTIONS_MARK_API_URL = "https://eapi.binance.com/eapi/v1/mark"
 SPOT_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
 
-st.set_page_config(page_title="Crypto Options Strat Lab", layout="wide")
+st.set_page_config(
+    page_title="Crypto Options Lab",
+    page_icon="📈",
+    layout="centered",   # centered works better on mobile than wide
+    initial_sidebar_state="collapsed",
+)
 
-# --- 2. DATA FETCHING ---
+# Mobile-friendly CSS
+st.markdown("""
+<style>
+  /* Tighten padding on small screens */
+  .block-container { padding: 1rem 0.75rem !important; }
+  /* Make metric cards readable on phones */
+  [data-testid="metric-container"] { background: #1a1d29; border-radius: 8px; padding: 0.5rem; }
+  /* Horizontal scroll for dataframes on narrow screens */
+  [data-testid="stDataFrame"] { overflow-x: auto; }
+  /* Reduce h1 size on mobile */
+  h1 { font-size: 1.5rem !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# --- DATA FETCHING ---
 @st.cache_data(ttl=60)
 def fetch_spot_prices():
     try:
-        url = SPOT_PRICE_URL
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        return {item['symbol']: float(item['price']) for item in data}
-    except:
+        r = requests.get(SPOT_PRICE_URL, timeout=5)
+        return {item["symbol"]: float(item["price"]) for item in r.json()}
+    except Exception:
         return {}
+
 
 @st.cache_data(ttl=60)
 def fetch_data():
     try:
         t_res = requests.get(OPTIONS_TICKER_API_URL, timeout=10)
         if t_res.status_code != 200:
-            st.error(f"Ticker API Error: {t_res.status_code} - {t_res.text[:200]}")
+            st.error(f"Ticker API {t_res.status_code}: {t_res.text[:200]}")
             return pd.DataFrame()
-            
+
         tickers = t_res.json()
-        
+
         m_res = requests.get(OPTIONS_MARK_API_URL, timeout=10)
-        if m_res.status_code != 200:
-            st.error(f"Mark API Error: {m_res.status_code} - {m_res.text[:200]}")
-            marks = []
-        else:
-            marks = m_res.json()
-            
-        mark_map = {m['symbol']: m for m in marks}
-        
+        marks = m_res.json() if m_res.status_code == 200 else []
+        mark_map = {m["symbol"]: m for m in marks}
+
         data = []
         for t in tickers:
-            sym = t['symbol']
+            sym = t["symbol"]
             try:
-                parts = sym.split('-')
-                if len(parts) != 4: continue
-                underlying = parts[0]
-                expiry_str = parts[1]
-                strike = float(parts[2])
-                side = "Call" if parts[3] == "C" else "Put"
-                
-                # Expiry Filter
+                parts = sym.split("-")
+                if len(parts) != 4:
+                    continue
+                underlying, expiry_str, strike_s, call_put = parts
+                strike = float(strike_s)
+                side = "Call" if call_put == "C" else "Put"
+
                 expiry_date = datetime.strptime(expiry_str, "%y%m%d")
-                curr_date = datetime.now()
-                dte = (expiry_date - curr_date).days
-                if dte < 0: continue 
+                dte = (expiry_date - datetime.now()).days
+                if dte < 0:
+                    continue
 
                 m = mark_map.get(sym, {})
-                iv = float(m.get('markIV', 0))
-                delta = float(m.get('delta', 0))
-                gamma = float(m.get('gamma', 0))
-                theta = float(m.get('theta', 0))
-                vega = float(m.get('vega', 0))
-                
-                price = float(t.get('lastPrice', 0))
-                bid = float(t.get('bidPrice', 0))
-                ask = float(t.get('askPrice', 0))
-                vol = float(t.get('volume', 0))
-                
                 data.append({
-                    "Symbol": sym, "Underlying": underlying, "Expiry": expiry_date.strftime("%Y-%m-%d"),
-                    "DTE": dte, "Strike": strike, "Type": side, "Price": price, "Bid": bid, "Ask": ask,
-                    "Vol": vol, "IV": iv, "Delta": delta, "Gamma": gamma, "Theta": theta, "Vega": vega
+                    "Symbol": sym,
+                    "Underlying": underlying,
+                    "Expiry": expiry_date.strftime("%Y-%m-%d"),
+                    "DTE": dte,
+                    "Strike": strike,
+                    "Type": side,
+                    "Price": float(t.get("lastPrice", 0)),
+                    "Bid": float(t.get("bidPrice", 0)),
+                    "Ask": float(t.get("askPrice", 0)),
+                    "Vol": float(t.get("volume", 0)),
+                    "IV": float(m.get("markIV", 0)),
+                    "Delta": float(m.get("delta", 0)),
+                    "Gamma": float(m.get("gamma", 0)),
+                    "Theta": float(m.get("theta", 0)),
+                    "Vega": float(m.get("vega", 0)),
                 })
-            except: continue
+            except Exception:
+                continue
         return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Data Fetch Error: {e}")
+        st.error(f"Fetch error: {e}")
         return pd.DataFrame()
 
-# --- 3. PAYOFF DIAGRAM CALCULATION ---
+
+# --- PAYOFF CALC ---
 def calculate_payoff(strategy, spot_range_min, spot_range_max):
     x = np.linspace(spot_range_min, spot_range_max, 300)
     total_pnl = np.zeros_like(x)
-    
-    for leg in strategy['Legs']:
-        strike = leg['Option']['Strike']
-        premium = leg['Price']
-        side = leg['Side']
-        otype = leg['Option']['Type']
-        
-        if otype == 'Call':
-            intrinsic = np.maximum(x - strike, 0)
-        else:
-            intrinsic = np.maximum(strike - x, 0)
-            
-        if side == 'Buy':
-            # Long: Pay Premium, Gain Intrinsic
-            leg_pnl = intrinsic - premium
-        else:
-            # Short: Gain Premium, Lose Intrinsic
-            leg_pnl = premium - intrinsic
-            
-        total_pnl += leg_pnl
-        
+    for leg in strategy["Legs"]:
+        strike = leg["Option"]["Strike"]
+        premium = leg["Price"]
+        intrinsic = (
+            np.maximum(x - strike, 0)
+            if leg["Option"]["Type"] == "Call"
+            else np.maximum(strike - x, 0)
+        )
+        total_pnl += (intrinsic - premium) if leg["Side"] == "Buy" else (premium - intrinsic)
     return x, total_pnl
 
-# --- 4. STRATEGY ALGORITHMS ---
+
+# --- STRATEGY ENGINE ---
 def generate_recommendations(df, spot_prices):
     recs = []
     df = df.copy()
-    
-    # Filter for liquidity
-    df['Liquid'] = (df['Vol'] > 1) & (df['Bid'] > 0)
-    
-    def find_leg(subset_df, type_filter, min_delta, max_delta):
-        candidates = subset_df[
-            (subset_df['Type'] == type_filter) & 
-            (subset_df['Delta'] >= min_delta) & 
-            (subset_df['Delta'] <= max_delta) & 
-            (subset_df['Liquid'])
+    df["Liquid"] = (df["Vol"] > 1) & (df["Bid"] > 0)
+
+    def find_leg(sub, type_filter, dmin, dmax):
+        c = sub[
+            (sub["Type"] == type_filter)
+            & (sub["Delta"] >= dmin)
+            & (sub["Delta"] <= dmax)
+            & (sub["Liquid"])
         ]
-        return candidates.sort_values('Vol', ascending=False).iloc[0] if not candidates.empty else None
+        return c.sort_values("Vol", ascending=False).iloc[0] if not c.empty else None
 
-    # Group by Underlying AND Expiry
-    grouped = df.groupby(['Underlying', 'Expiry', 'DTE'])
-    
-    for (underlying, exp, dte), group_df in grouped:
-        spot_price = spot_prices.get(f"{underlying}USDT", 0)
-        if spot_price == 0: continue
+    for (underlying, exp, dte), grp in df.groupby(["Underlying", "Expiry", "DTE"]):
+        spot = spot_prices.get(f"{underlying}USDT", 0)
+        if spot == 0:
+            continue
 
-        # --- A. LONG CALL (Directional Bullish) ---
-        long_call = find_leg(group_df, 'Call', 0.45, 0.65) # ATM/ITM Call
-        
-        if long_call is not None:
-            premium = long_call['Ask']
-            if premium > 0:
-                recs.append({
-                    "Type": "Long Call",
-                    "Symbol": f"{underlying} Long Call {long_call['Strike']}",
-                    "Underlying": underlying,
-                    "Expiry": exp,
-                    "DTE": dte,
-                    "Spot": spot_price,
-                    "Legs": [
-                        {"Side": "Buy", "Option": long_call, "Price": premium}
-                    ],
-                    "Credit": -premium, # Debit logic handled inverted for display or standardized? Let's use negative credit for debit
-                    "MaxRisk": premium,
-                    "NetDelta": long_call['Delta'], 
-                    "NetTheta": long_call['Theta'],
-                    "NetGamma": long_call['Gamma'],
-                    "NetVega": long_call['Vega'],
-                    "BreakEven": long_call['Strike'] + premium,
-                    "ProbProfit": (1 - long_call['Delta']) * 100 # Rough approx
-                })
+        long_call = find_leg(grp, "Call", 0.45, 0.65)
+        if long_call is not None and long_call["Ask"] > 0:
+            p = long_call["Ask"]
+            recs.append({
+                "Type": "Long Call", "Underlying": underlying, "Expiry": exp, "DTE": dte,
+                "Symbol": f"{underlying} Call {long_call['Strike']}", "Spot": spot,
+                "Legs": [{"Side": "Buy", "Option": long_call, "Price": p}],
+                "Credit": -p, "MaxRisk": p,
+                "NetDelta": long_call["Delta"], "NetTheta": long_call["Theta"],
+                "NetGamma": long_call["Gamma"], "NetVega": long_call["Vega"],
+                "BreakEven": long_call["Strike"] + p,
+                "ProbProfit": (1 - long_call["Delta"]) * 100,
+            })
 
-        # --- B. LONG PUT (Directional Bearish) ---
-        long_put = find_leg(group_df, 'Put', -0.65, -0.45) # ATM/ITM Put
-        
-        if long_put is not None:
-            premium = long_put['Ask']
-            if premium > 0:
-                recs.append({
-                    "Type": "Long Put",
-                    "Symbol": f"{underlying} Long Put {long_put['Strike']}",
-                    "Underlying": underlying,
-                    "Expiry": exp,
-                    "DTE": dte,
-                    "Spot": spot_price,
-                    "Legs": [
-                        {"Side": "Buy", "Option": long_put, "Price": premium}
-                    ],
-                    "Credit": -premium,
-                    "MaxRisk": premium,
-                    "NetGamma": long_put['Gamma'],
-                    "NetVega": long_put['Vega'],
-                    "NetDelta": long_put['Delta'], 
-                    "NetTheta": long_put['Theta'],
-                    "BreakEven": long_put['Strike'] - premium,
-                    "ProbProfit": (1 - abs(long_put['Delta'])) * 100 
-                })
+        long_put = find_leg(grp, "Put", -0.65, -0.45)
+        if long_put is not None and long_put["Ask"] > 0:
+            p = long_put["Ask"]
+            recs.append({
+                "Type": "Long Put", "Underlying": underlying, "Expiry": exp, "DTE": dte,
+                "Symbol": f"{underlying} Put {long_put['Strike']}", "Spot": spot,
+                "Legs": [{"Side": "Buy", "Option": long_put, "Price": p}],
+                "Credit": -p, "MaxRisk": p,
+                "NetDelta": long_put["Delta"], "NetTheta": long_put["Theta"],
+                "NetGamma": long_put["Gamma"], "NetVega": long_put["Vega"],
+                "BreakEven": long_put["Strike"] - p,
+                "ProbProfit": (1 - abs(long_put["Delta"])) * 100,
+            })
 
-        # --- C. LONG STRADDLE (Volatility Play) ---
-        # Buy ATM Call + Buy ATM Put
-        atm_call = find_leg(group_df, 'Call', 0.45, 0.55)
-        # Find put with matching strike
+        atm_call = find_leg(grp, "Call", 0.45, 0.55)
         if atm_call is not None:
-             atm_put = group_df[(group_df['Strike'] == atm_call['Strike']) & (group_df['Type'] == 'Put') & (group_df['Liquid'])]
-             
-             if not atm_put.empty:
-                atm_put = atm_put.iloc[0]
-                cost = atm_call['Ask'] + atm_put['Ask']
-                
+            atm_put_df = grp[(grp["Strike"] == atm_call["Strike"]) & (grp["Type"] == "Put") & (grp["Liquid"])]
+            if not atm_put_df.empty:
+                atm_put = atm_put_df.iloc[0]
+                cost = atm_call["Ask"] + atm_put["Ask"]
                 if cost > 0:
-                     recs.append({
-                        "Type": "Long Straddle",
-                        "Symbol": f"{underlying} Straddle {atm_call['Strike']}",
-                        "Underlying": underlying,
-                        "Expiry": exp,
-                        "DTE": dte,
-                        "Spot": spot_price,
+                    recs.append({
+                        "Type": "Long Straddle", "Underlying": underlying, "Expiry": exp, "DTE": dte,
+                        "Symbol": f"{underlying} Straddle {atm_call['Strike']}", "Spot": spot,
                         "Legs": [
-                            {"Side": "Buy", "Option": atm_call, "Price": atm_call['Ask']},
-                            {"Side": "Buy", "Option": atm_put, "Price": atm_put['Ask']}
+                            {"Side": "Buy", "Option": atm_call, "Price": atm_call["Ask"]},
+                            {"Side": "Buy", "Option": atm_put, "Price": atm_put["Ask"]},
                         ],
-                        "Credit": -cost, 
-                        "MaxRisk": cost,
-                        "NetGamma": atm_call['Gamma'] + atm_put['Gamma'],
-                        "NetVega": atm_call['Vega'] + atm_put['Vega'],
-                        "NetDelta": atm_call['Delta'] + atm_put['Delta'], 
-                        "NetTheta": atm_call['Theta'] + atm_put['Theta'],
+                        "Credit": -cost, "MaxRisk": cost,
+                        "NetDelta": atm_call["Delta"] + atm_put["Delta"],
+                        "NetTheta": atm_call["Theta"] + atm_put["Theta"],
+                        "NetGamma": atm_call["Gamma"] + atm_put["Gamma"],
+                        "NetVega": atm_call["Vega"] + atm_put["Vega"],
                         "BreakEven": f"{atm_call['Strike'] - cost:.2f} / {atm_call['Strike'] + cost:.2f}",
-                        "ProbProfit": 40 # Varies heavily, hard to calc simply
+                        "ProbProfit": 40,
                     })
 
     return pd.DataFrame(recs)
 
-# --- 5. MAIN UI ---
-def main():
-    st.title("🧠 AI Crypto Options Strategist")
-    st.caption("Auto-generated Defined Risk Strategies with Payoff Diagrams")
 
-    # 1. Fetch
-    with st.spinner("Scanning Entire Market (BTC, ETH, BNB, etc.)..."):
+# --- MAIN UI ---
+def main():
+    st.title("📈 Crypto Options Lab")
+    st.caption("Live defined-risk strategies • tap a row for details")
+
+    with st.spinner("Scanning market…"):
         full_df = fetch_data()
         spot_prices = fetch_spot_prices()
-        
-    # Force redeploy: Update 2
-    if full_df.empty:
-        st.error("Data unavailable. This could be due to API limits or empty response. See detailed error above if any."); st.stop()
 
-    # 2. Generate Recommendations for ALL assets
-    opportunities_df = generate_recommendations(full_df, spot_prices)
-    
-    if opportunities_df.empty:
-        st.info("No high-probability defined risk setups found currently.")
+    if full_df.empty:
+        st.error("No data — check API or try again.")
         st.stop()
-        
-    # 3. Master Table
+
+    opps = generate_recommendations(full_df, spot_prices)
+
+    if opps.empty:
+        st.info("No setups found right now. Pull to refresh.")
+        st.stop()
+
+    # --- Opportunity table (compact for mobile) ---
     st.subheader("Opportunities")
-    
-    # Styling column config
-    column_config = {
-        "Symbol": st.column_config.TextColumn("Strategy Name", width="large"),
-        "Type": st.column_config.TextColumn("Type", width="medium"),
+
+    display_cols = ["Underlying", "Type", "DTE", "Credit", "MaxRisk", "ProbProfit", "NetDelta"]
+    col_cfg = {
         "Underlying": st.column_config.TextColumn("Asset", width="small"),
-        "Expiry": st.column_config.TextColumn("Expiry", width="medium"),
+        "Type": st.column_config.TextColumn("Strategy", width="medium"),
+        "DTE": st.column_config.NumberColumn("Days", format="%d"),
+        "Credit": st.column_config.NumberColumn("Cost $", format="%.2f"),
+        "MaxRisk": st.column_config.NumberColumn("Max Risk $", format="%.2f"),
+        "ProbProfit": st.column_config.NumberColumn("Prob %", format="%.0f%%"),
         "NetDelta": st.column_config.NumberColumn("Delta", format="%.2f"),
-        "NetGamma": st.column_config.NumberColumn("Gamma", format="%.4f"),
-        "NetTheta": st.column_config.NumberColumn("Theta", format="%.2f"),
-        "NetVega": st.column_config.NumberColumn("Vega", format="%.2f"),
     }
 
-    # Use selection API for the table
     event = st.dataframe(
-        opportunities_df[['Underlying', 'Type', 'Expiry', 'DTE', 'Symbol', 'Credit', 'MaxRisk', 'ProbProfit', 'NetDelta', 'NetGamma', 'NetTheta', 'NetVega']],
-        column_config=column_config,
+        opps[display_cols],
+        column_config=col_cfg,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode="single-row"
+        selection_mode="single-row",
     )
 
-    # 4. Detail View (Conditionally Rendered)
-    if len(event.selection.rows) > 0:
-        selected_row_index = event.selection.rows[0]
-        strategy = opportunities_df.iloc[selected_row_index]
-        
-        st.divider()
-        st.markdown(f"### Analysis: {strategy['Symbol']}")
-        
-        # --- DASHBOARD LAYOUT ---
-        dash_col1, dash_col2 = st.columns([2, 1])
-        
-        with dash_col1:
-            # Plot Payoff
-            spot = strategy['Spot']
-            # Determine range for plot
-            x_min = spot * 0.75
-            x_max = spot * 1.25
-            x_vals, y_vals = calculate_payoff(strategy, x_min, x_max)
-            
-            fig = go.Figure()
-            
-            # Green/Red Areas
-            fig.add_trace(go.Scatter(
-                x=x_vals, y=y_vals,
-                fill='tozeroy',
-                mode='lines',
-                line=dict(color='cyan', width=3),
-                name='P/L at Expiry'
-            ))
-            
-            # Zero Line
-            fig.add_hline(y=0, line_dash="dash", line_color="white")
-            
-            # Current Price Marker
-            fig.add_vline(x=spot, line_dash="dash", line_color="yellow", annotation_text="Current Price")
-            
-            # Break Even Marker (Vertical Line)
-            if isinstance(strategy['BreakEven'], (int, float)):
-                 fig.add_vline(x=strategy['BreakEven'], line_dash="dot", line_color="orange", annotation_text="Break Even")
-            
-            fig.update_layout(
-                title=f"Payoff Diagram ({strategy['Type']})",
-                xaxis_title="Price at Expiry",
-                yaxis_title="Profit / Loss ($)",
-                template="plotly_dark",
-                height=450
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-        with dash_col2:
-            st.subheader("Risk Mechanics")
-            
-            m1, m2 = st.columns(2)
-            m1.metric("Est. Cost (Debit)", f"${-strategy['Credit']:.2f}", help="Cash PAID upfront.")
-            m2.metric("Max Loss", f"${strategy['MaxRisk']:.2f}", delta_color="inverse", help="Total premium paid.")
-            
-            st.metric("Probability of Profit (Est.)", f"{strategy['ProbProfit']:.1f}%", help="Estimated chance that the price stays in the profit zone.")
-            
-            if isinstance(strategy['BreakEven'], (int, float)):
-                st.metric("Break Even Price", f"${strategy['BreakEven']:,.2f}")
-            else:
-                 st.metric("Break Even Prices", str(strategy['BreakEven']))
-                
-            st.markdown("---")
-            g1, g2 = st.columns(2)
-            g1.metric("Net Delta", f"{strategy['NetDelta']:.3f}", help="Directional risk.")
-            g2.metric("Net Theta", f"{strategy['NetTheta']:.2f}", help="Daily time decay earnings.")
+    # --- Detail view ---
+    if not event.selection.rows:
+        st.info("Tap a row above to see the payoff diagram.")
+        return
 
-        # 5. EXECUTION DETAILS
-        st.subheader("Strategy Composition (Legs)")
-        legs_data = []
-        for leg in strategy['Legs']:
-            opt = leg['Option']
-            legs_data.append({
-                "Action": leg['Side'],
-                "Expiry": opt['Expiry'],
-                "Strike": opt['Strike'],
-                "Type": opt['Type'],
-                "Limit Price": f"${leg['Price']:.2f}",
-                "Delta": f"{opt['Delta']:.2f}",
-                "Gamma": f"{opt['Gamma']:.4f}",
-                "Theta": f"{opt['Theta']:.2f}"
-            })
-            
-        st.dataframe(pd.DataFrame(legs_data), use_container_width=True)
+    strat = opps.iloc[event.selection.rows[0]]
+    st.divider()
+    st.markdown(f"### {strat['Symbol']}")
+
+    # Metrics row — stacks nicely on mobile
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Cost", f"${-strat['Credit']:.2f}")
+    c2.metric("Max Loss", f"${strat['MaxRisk']:.2f}")
+    c3.metric("Prob %", f"{strat['ProbProfit']:.0f}%")
+
+    d1, d2 = st.columns(2)
+    d1.metric("Delta", f"{strat['NetDelta']:.3f}")
+    d2.metric("Theta", f"{strat['NetTheta']:.2f}")
+
+    be = strat["BreakEven"]
+    if isinstance(be, (int, float)):
+        st.metric("Break Even", f"${be:,.2f}")
     else:
-        st.info("👆 Select an opportunity from the table above to view the analysis and payoff diagram.")
+        st.metric("Break Even", str(be))
+
+    # Payoff chart
+    spot = strat["Spot"]
+    x_vals, y_vals = calculate_payoff(strat, spot * 0.75, spot * 1.25)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x_vals, y=y_vals, fill="tozeroy", mode="lines",
+        line=dict(color="#00d4ff", width=2), name="P/L at Expiry",
+    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="white", line_width=1)
+    fig.add_vline(x=spot, line_dash="dash", line_color="yellow",
+                  annotation_text="Spot", annotation_position="top right")
+    if isinstance(be, (int, float)):
+        fig.add_vline(x=be, line_dash="dot", line_color="orange",
+                      annotation_text="BE", annotation_position="top left")
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=300,           # shorter chart fits mobile screen
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis_title="Price at Expiry",
+        yaxis_title="P/L ($)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Legs table
+    st.markdown("**Legs**")
+    legs_data = [
+        {
+            "Action": leg["Side"],
+            "Strike": leg["Option"]["Strike"],
+            "Type": leg["Option"]["Type"],
+            "Price $": f"{leg['Price']:.2f}",
+            "Delta": f"{leg['Option']['Delta']:.2f}",
+        }
+        for leg in strat["Legs"]
+    ]
+    st.dataframe(pd.DataFrame(legs_data), use_container_width=True, hide_index=True)
+
 
 if __name__ == "__main__":
     main()
